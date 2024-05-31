@@ -3,6 +3,7 @@
 # pylint: disable=line-too-long
 import copy
 import logging
+import os
 import re
 from contextlib import suppress
 from typing import Any, Dict, List, MutableMapping, Union
@@ -348,6 +349,8 @@ class CreateMixin:  # pylint: disable=too-few-public-methods
         payload = self._render_payload(payload)
         payload = api.prepare_body(payload)
 
+        print("{}".format(payload))
+
         response = self.client.post(
             "/containers/create", headers={"content-type": "application/json"}, data=payload
         )
@@ -527,6 +530,7 @@ class CreateMixin:  # pylint: disable=too-few-public-methods
             "user": pop("user"),
             "version": pop("version"),
             "volumes": [],
+            "host_config": {},
             "volumes_from": pop("volumes_from"),
             "work_dir": pop("workdir") or pop("working_dir"),
         }
@@ -667,6 +671,37 @@ class CreateMixin:  # pylint: disable=too-few-public-methods
                 }
             )
 
+        def is_bind_volume(volume_key: str) -> bool:
+            """
+            This function determines if the volume is a bind mount.
+
+            - Starts with a / -> indicating an absolute path
+            - Starts with ./ or ../  -> indicating a relative path
+            - Is an absolute path according to os.path.isabs(volume_key)
+
+            :param volume_key: The key value of the Volume object.
+            :return:
+            """
+
+            # Another solution is a RegExp: re.compile(r'^(/|./|../)')
+            if (volume_key.startswith('/') or
+                    volume_key.startswith('./') or
+                    volume_key.startswith('../') or
+                    os.path.isabs(key)):
+                return True
+            return False
+
+        def parent_directory_exists(path: str) -> bool:
+            """
+            Check if the parent directory exists of the provided path.
+
+            :param path: The path as string.
+            :return: True if the parent dir exists, else False
+            """
+
+            parent_dir = os.path.dirname(path)
+            return os.path.isdir(parent_dir)
+
         for item in args.pop("volumes", {}).items():
             key, value = item
             extended_mode = value.get('extended_mode', [])
@@ -680,7 +715,20 @@ class CreateMixin:  # pylint: disable=too-few-public-methods
                     raise ValueError("'mode' value should be a str")
                 options.append(mode)
 
-            volume = {"Name": key, "Dest": value["bind"], "Options": options}
+            if is_bind_volume(key):
+                # It's a bind mount (Volume on the host)
+                if not parent_directory_exists(os.path.abspath(key)):
+                    raise ValueError("(At least) the parent directory directory"
+                                     f"doesn't exist of the provided bind volume ({key})!")
+                volume = {"Source": os.path.abspath(key), "Dest": value["bind"], "Options": options}
+                if "binds" not in params["host_config"]:
+                    params["host_config"] = [{"binds": value["bind"]}]
+                else:
+                    params["host_config"]["binds"].append(value["bind"])
+            else:
+                # It's a named volume (Virtual (Named) volume)
+                volume = {"Name": key, "Dest": value["bind"], "Options": options}
+
             params["volumes"].append(volume)
 
         for item in args.pop("secrets", []):
